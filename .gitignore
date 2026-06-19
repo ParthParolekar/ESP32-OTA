@@ -1,0 +1,17 @@
+# Build output — large, always regenerated
+build/
+
+# SDK configuration OLD —
+sdkconfig.old
+
+# VS Code local settings
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Eclipse/other IDE files
+.project
+.cproject
+*.cfg
