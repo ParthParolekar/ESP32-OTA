@@ -1,7 +1,8 @@
 # Build output — large, always regenerated
 build/
 
-# SDK configuration OLD —
+# SDK configuration — contains local credentials
+sdkconfig
 sdkconfig.old
 
 # VS Code local settings
