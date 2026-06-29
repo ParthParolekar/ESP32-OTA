@@ -12,6 +12,8 @@
 #include "sdkconfig.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_app_desc.h"
+#include "cJSON.h"
 
 #define WIFI_SSID           CONFIG_WIFI_SSID
 #define WIFI_PASS           CONFIG_WIFI_PASSWORD
@@ -19,7 +21,7 @@
 #define WIFI_FAIL_BIT       BIT1
 #define MAX_RETRY           5
 
-#define OTA_URL             "http://192.168.0.101:8070/esp32-ota.bin"
+#define VERSION_URL        "http://192.168.0.101:8070/version.json"
 #define OTA_BUF_SIZE        1024
 
 static EventGroupHandle_t s_wifi_event_group;
@@ -86,7 +88,92 @@ static void wifi_init_sta(void){
     }
 }
 
-static void ota_update(void){
+// Version Check -----------------------------------------------------------------------------------------------------
+
+static bool parse_semver(const char *ver, int *major, int *minor, int *patch){
+    return sscanf(ver, "%d.%d.%d", major, minor, patch) == 3;
+}
+
+// returns true if a is newer than b
+static bool version_newer(const char *a, const char *b){
+    int a_maj, a_min, a_pat, b_maj, b_min, b_pat;
+    if(!parse_semver(a, &a_maj, &a_min, &a_pat) || !parse_semver(b, &b_maj, &b_min, &b_pat)){
+        return false;
+    }
+
+    if(a_maj != b_maj) return a_maj > b_maj;
+    if(a_min != b_min) return a_min > b_min;
+    return a_pat > b_pat;
+}
+
+//compares firmware url to version.json
+//If an update is available, copies the firmware url into out url and returns true
+static bool check_for_update(char *out_url, size_t url_len){
+    char response_buf[256] = {0};
+
+    esp_http_client_config_t config = {
+        .url = VERSION_URL,
+        .method = HTTP_METHOD_GET
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    
+    esp_err_t err = esp_http_client_open(client, 0);
+
+    if(err != ESP_OK){
+        ESP_LOGE(TAG, "Failed to open version check connection: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    esp_http_client_fetch_headers(client);
+    int data_read = esp_http_client_read_response(client, response_buf, sizeof(response_buf));
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if(data_read <=0){
+        ESP_LOGE(TAG, "Failed to read version.json");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "version.json: %s", response_buf);
+
+    //Parse JSON
+    cJSON *root = cJSON_Parse(response_buf);
+    if(!root){
+        ESP_LOGE(TAG, "JSON parse failed");
+        return false;
+    }
+
+    cJSON *ver_item = cJSON_GetObjectItem(root, "version");
+    cJSON *url_item = cJSON_GetObjectItem(root, "url");
+
+    if(!cJSON_IsString(ver_item) || !cJSON_IsString(url_item)){
+        ESP_LOGE(TAG, "version.json is missing either 'version', 'url' or both");
+        return false;
+    }
+
+    const char *server_ver = ver_item->valuestring;
+    const char *running_ver = esp_ota_get_app_description()->version;
+    
+    ESP_LOGI(TAG, "Running: %s  |  Server: %s", running_ver, server_ver);
+    
+    bool update_needed = version_newer(server_ver, running_ver);
+    if(update_needed){
+        strncpy(out_url, url_item->valuestring, url_len - 1);
+        out_url[url_len - 1] = '\0';
+        ESP_LOGI(TAG, "Update available: %s -> %s", running_ver, server_ver);
+    }else{
+        ESP_LOGI(TAG, "Firmware is up to date - not OTA update needed");
+    }
+
+    cJSON_Delete(root);
+    return update_needed;
+}
+
+// OTA Update --------------------------------------------------------------------------------------------------------
+
+static void ota_update(const char *url){
     ESP_LOGI(TAG, "Starting OTA Update");
 
     // Step 1: Find the next OTA partition to write into
@@ -107,7 +194,7 @@ static void ota_update(void){
 
     // Step 3: Open HTTP connection and stream firmware
     esp_http_client_config_t config = {
-        .url    = OTA_URL,
+        .url    = url,
         .method = HTTP_METHOD_GET,
     };
 
@@ -181,41 +268,6 @@ static void ota_update(void){
 
 }
 
-// static void https_get_request(void){
-//     char response_buf[512] = {0};
-
-//     esp_http_client_config_t config = {
-//         .url                = "https://www.google.com",
-//         .crt_bundle_attach  = esp_crt_bundle_attach,
-//         .method             = HTTP_METHOD_GET, 
-//     };
-
-//     esp_http_client_handle_t client = esp_http_client_init(&config);
-
-//     esp_err_t err = esp_http_client_open(client, 0);
-//     if(err != ESP_OK){
-//         ESP_LOGE(TAG, "Failed to open HTTPS connection %s", esp_err_to_name(err));
-//         esp_http_client_cleanup(client);
-//         return;
-//     }
-
-//     int content_length = esp_http_client_fetch_headers(client);
-//     int status_code = esp_http_client_get_status_code(client);
-//     ESP_LOGI(TAG, "HTTP Status: %d, Content_Length: %d", status_code, content_length);
-
-//     int data_read = esp_http_client_read_response(client, response_buf, sizeof(response_buf) - 1);
-
-//     if(data_read >= 0){
-//         ESP_LOGI(TAG, "Response:\n%s", response_buf);
-//     }else{
-//         ESP_LOGE(TAG, "Failed to read a response");
-//     }
-
-//     esp_http_client_close(client);
-//     esp_http_client_cleanup(client);
-// }
-
-
 void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32 OTA Project");
@@ -235,6 +287,10 @@ void app_main(void)
     //Marks firmware as valid now that wifi is up
     esp_ota_mark_app_valid_cancel_rollback();
 
-    //OTA Update
-    ota_update();
+    //OTA Update if newer version available
+    char ota_url[256] = {0};
+    if(check_for_update(ota_url, sizeof(ota_url))){
+        ota_update(ota_url);
+    }
+
 }

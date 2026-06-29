@@ -6,4 +6,5 @@ idf_component_register(SRCS "esp32-ota.c"
                         nvs_flash
                         esp_http_client
                         esp-tls
-                        app_update)
+                        app_update
+                        json)
