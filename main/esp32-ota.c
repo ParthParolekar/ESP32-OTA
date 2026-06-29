@@ -10,12 +10,17 @@
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "sdkconfig.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 
 #define WIFI_SSID           CONFIG_WIFI_SSID
 #define WIFI_PASS           CONFIG_WIFI_PASSWORD
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
 #define MAX_RETRY           5
+
+#define OTA_URL             "http://192.168.0.101:8070/esp32-ota.bin"
+#define OTA_BUF_SIZE        1024
 
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
@@ -81,39 +86,134 @@ static void wifi_init_sta(void){
     }
 }
 
-static void https_get_request(void){
-    char response_buf[512] = {0};
+static void ota_update(void){
+    ESP_LOGI(TAG, "Starting OTA Update");
 
+    // Step 1: Find the next OTA partition to write into
+    const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
+    if(update_partition == NULL){
+        ESP_LOGE(TAG, "No OTA Partion found");
+        return;
+    }
+    ESP_LOGI(TAG, "Writing to partition: %s at offest 0x%lx", update_partition->label, update_partition->address);
+
+    // Step 2: Begin OTA
+    esp_ota_handle_t ota_handle;
+    esp_err_t err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+    if(err != ESP_OK){
+        ESP_LOGE(TAG, "ota_partition_begin() failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Step 3: Open HTTP connection and stream firmware
     esp_http_client_config_t config = {
-        .url                = "https://www.google.com",
-        .crt_bundle_attach  = esp_crt_bundle_attach,
-        .method             = HTTP_METHOD_GET, 
+        .url    = OTA_URL,
+        .method = HTTP_METHOD_GET,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
 
-    esp_err_t err = esp_http_client_open(client, 0);
+    err = esp_http_client_open(client, 0);
     if(err != ESP_OK){
-        ESP_LOGE(TAG, "Failed to open HTTPS connection %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
+        esp_ota_abort(ota_handle);
         esp_http_client_cleanup(client);
         return;
     }
 
     int content_length = esp_http_client_fetch_headers(client);
-    int status_code = esp_http_client_get_status_code(client);
-    ESP_LOGI(TAG, "HTTP Status: %d, Content_Length: %d", status_code, content_length);
+    ESP_LOGI(TAG, "Firmware size: %d bytes", content_length);
 
-    int data_read = esp_http_client_read_response(client, response_buf, sizeof(response_buf) - 1);
+    // Step 4: Write chunks as they arrive
+    char buf[OTA_BUF_SIZE];
+    int total_written = 0;
 
-    if(data_read >= 0){
-        ESP_LOGI(TAG, "Response:\n%s", response_buf);
-    }else{
-        ESP_LOGE(TAG, "Failed to read a response");
+    while(1){
+        int data_read = esp_http_client_read(client, buf, OTA_BUF_SIZE);
+
+        if(data_read<0){
+            ESP_LOGE(TAG, "Error reading HTTP stream");
+            esp_ota_abort(ota_handle);
+            esp_http_client_cleanup(client);
+            return;
+        }
+
+        if(data_read == 0){
+            //Check if we are done
+            if(esp_http_client_is_complete_data_received(client)){
+                ESP_LOGI(TAG, "Download Complete, total: %d bytes", total_written);
+                break;
+            }
+            continue;
+        }
+
+        err = esp_ota_write(ota_handle, buf, data_read);
+        if(err != ESP_OK){
+            ESP_LOGE(TAG, "esp_ota_write() failed: %s", esp_err_to_name(err));
+            esp_ota_abort(ota_handle);
+            esp_http_client_cleanup(client);
+            return;
+        }
+
+        total_written += data_read;
+        ESP_LOGI(TAG, "Written %d/%d bytes", total_written, content_length);
     }
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+
+    // Step 5: Validate the written image
+    err = esp_ota_end(ota_handle);
+    if(err != ESP_OK){
+        ESP_LOGE(TAG, "esp_ota_end() failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Step 6: Set boot partition and restart
+    err = esp_ota_set_boot_partition(update_partition);
+    if(err != ESP_OK){
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "OTA Successful, restarting...");
+    esp_restart();
+
 }
+
+// static void https_get_request(void){
+//     char response_buf[512] = {0};
+
+//     esp_http_client_config_t config = {
+//         .url                = "https://www.google.com",
+//         .crt_bundle_attach  = esp_crt_bundle_attach,
+//         .method             = HTTP_METHOD_GET, 
+//     };
+
+//     esp_http_client_handle_t client = esp_http_client_init(&config);
+
+//     esp_err_t err = esp_http_client_open(client, 0);
+//     if(err != ESP_OK){
+//         ESP_LOGE(TAG, "Failed to open HTTPS connection %s", esp_err_to_name(err));
+//         esp_http_client_cleanup(client);
+//         return;
+//     }
+
+//     int content_length = esp_http_client_fetch_headers(client);
+//     int status_code = esp_http_client_get_status_code(client);
+//     ESP_LOGI(TAG, "HTTP Status: %d, Content_Length: %d", status_code, content_length);
+
+//     int data_read = esp_http_client_read_response(client, response_buf, sizeof(response_buf) - 1);
+
+//     if(data_read >= 0){
+//         ESP_LOGI(TAG, "Response:\n%s", response_buf);
+//     }else{
+//         ESP_LOGE(TAG, "Failed to read a response");
+//     }
+
+//     esp_http_client_close(client);
+//     esp_http_client_cleanup(client);
+// }
 
 
 void app_main(void)
@@ -132,6 +232,9 @@ void app_main(void)
     //Connect to Wifi
     wifi_init_sta();
 
-    //HTTPS Get request
-    https_get_request();
+    //Marks firmware as valid now that wifi is up
+    esp_ota_mark_app_valid_cancel_rollback();
+
+    //OTA Update
+    ota_update();
 }

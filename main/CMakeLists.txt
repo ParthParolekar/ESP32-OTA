@@ -5,4 +5,5 @@ idf_component_register(SRCS "esp32-ota.c"
                         esp_event
                         nvs_flash
                         esp_http_client
-                        esp-tls)
+                        esp-tls
+                        app_update)
