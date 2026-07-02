@@ -21,7 +21,8 @@
 #define WIFI_FAIL_BIT       BIT1
 #define MAX_RETRY           5
 
-#define VERSION_URL        "http://192.168.0.101:8070/version.json"
+// #define VERSION_URL        "http://192.168.0.101:8070/version.json"
+#define VERSION_URL        CONFIG_OTA_VERSION_URL
 #define OTA_BUF_SIZE        1024
 
 static EventGroupHandle_t s_wifi_event_group;

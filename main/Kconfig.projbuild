@@ -11,5 +11,20 @@ menu "WiFi Configuration"
         default "mypassword"
         help
             Password of the WiFi network.
+endmenu
+
+menu "OTA Configuration"
+    config OTA_VERSION_URL
+        string "Version manifest URL"
+        default "http://192.168.0.101:8070/version.json"
+        help
+            URL to version.json on you firmware server.
+
+    config OTA_FIRMWARE_URL
+        string "Firmware binary URL"
+        default "http://192.168.0.101:8070/esp32-ota.bin"
+        help
+            URL to the firmware .bin file. Should match the url field
+            in version.json — this is a fallback default only.
 
 endmenu
